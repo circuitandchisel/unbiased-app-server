@@ -6,12 +6,17 @@ on:
       - main
     paths:
       - ".github/workflows/unbiased-app-server-release.yml"
+      - ".github/scripts/select-app-server-build.py"
+      - ".github/scripts/test_select_app_server_build.py"
   push:
+    branches:
+      - main
     tags:
       - "unbiased-app-server-v*"
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   verify-tag:
@@ -21,6 +26,9 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Test release build selection
+        if: github.ref_type != 'tag'
+        run: python3 .github/scripts/test_select_app_server_build.py
       - name: Check release tag and source
         if: github.ref_type == 'tag'
         shell: bash
@@ -32,6 +40,7 @@ jobs:
 
   build:
     needs: verify-tag
+    if: github.ref == 'refs/heads/main'
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
@@ -91,34 +100,56 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/release"
           cp "target/$TARGET/release/codex-app-server" "$GITHUB_WORKSPACE/release/codex-app-server-$TARGET"
           tar -C "$GITHUB_WORKSPACE/release" -czf "$GITHUB_WORKSPACE/release/codex-app-server-$TARGET.tar.gz" "codex-app-server-$TARGET"
+          (cd "$GITHUB_WORKSPACE/release" && shasum -a 256 "codex-app-server-$TARGET.tar.gz" > "codex-app-server-$TARGET.sha256")
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: app-server-${{ matrix.target }}
-          path: release/codex-app-server-${{ matrix.target }}.tar.gz
+          path: |
+            release/codex-app-server-${{ matrix.target }}.tar.gz
+            release/codex-app-server-${{ matrix.target }}.sha256
           if-no-files-found: error
 
   publish:
-    needs: build
+    needs: verify-tag
     if: startsWith(github.ref, 'refs/tags/unbiased-app-server-v')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      actions: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
+      - name: Find verified main build
+        id: build
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_id="$(python3 .github/scripts/select-app-server-build.py "$GITHUB_REPOSITORY" "$GITHUB_SHA")"
+          printf 'run_id=%s\n' "$run_id" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: app-server-*
           merge-multiple: true
           path: release
+          run-id: ${{ steps.build.outputs.run_id }}
+          github-token: ${{ github.token }}
       - name: Record checksums and source commit
         shell: bash
         run: |
           set -euo pipefail
           test "$(find release -maxdepth 1 -name 'codex-app-server-*.tar.gz' | wc -l)" -eq 4
-          (cd release && sha256sum codex-app-server-*.tar.gz > SHA256SUMS)
-          printf 'Source commit: %s\n' "$GITHUB_SHA" > release/RELEASE_NOTES.txt
+          test "$(find release -maxdepth 1 -name 'codex-app-server-*.sha256' | wc -l)" -eq 4
+          for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
+            test -s "release/codex-app-server-$target.tar.gz"
+            test -s "release/codex-app-server-$target.sha256"
+            (cd release && sha256sum --check "codex-app-server-$target.sha256")
+            test "$(tar -tzf "release/codex-app-server-$target.tar.gz")" = "codex-app-server-$target"
+          done
+          (cd release && cat codex-app-server-*.sha256 > SHA256SUMS)
+          printf 'Source commit: %s\nBuild run: https://github.com/%s/actions/runs/%s\n' "$GITHUB_SHA" "$GITHUB_REPOSITORY" '${{ steps.build.outputs.run_id }}' > release/RELEASE_NOTES.txt
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: |
