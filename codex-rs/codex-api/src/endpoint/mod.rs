@@ -1,8 +1,11 @@
+// Modified by Circuit & Chisel in 2026: Add Pareto request-body size recovery support.
+
 pub(crate) mod images;
 pub(crate) mod memories;
 pub(crate) mod models;
 pub(crate) mod realtime_call;
 pub(crate) mod realtime_websocket;
+mod request_body_limit;
 pub(crate) mod responses;
 pub(crate) mod responses_websocket;
 pub(crate) mod search;

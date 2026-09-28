@@ -1,6 +1,9 @@
+// Modified by Circuit & Chisel in 2026: Bound Pareto request bodies and retry one 413.
+
 use crate::auth::SharedAuthProvider;
 use crate::common::ResponseStream;
 use crate::common::ResponsesApiRequest;
+use crate::endpoint::request_body_limit;
 use crate::endpoint::session::EndpointSession;
 use crate::error::ApiError;
 use crate::provider::Provider;
@@ -14,10 +17,12 @@ use codex_client::EncodedJsonBody;
 use codex_client::HttpTransport;
 use codex_client::RequestCompression;
 use codex_client::RequestTelemetry;
+use codex_client::TransportError;
 use codex_protocol::protocol::SessionSource;
 use http::HeaderMap;
 use http::HeaderValue;
 use http::Method;
+use http::StatusCode;
 use serde_json::Value;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -26,6 +31,7 @@ use tracing::instrument;
 pub struct ResponsesClient<T: HttpTransport> {
     session: EndpointSession<T>,
     sse_telemetry: Option<Arc<dyn SseTelemetry>>,
+    max_body_bytes: Option<usize>,
 }
 
 #[derive(Default)]
@@ -43,7 +49,17 @@ impl<T: HttpTransport> ResponsesClient<T> {
         Self {
             session: EndpointSession::new(transport, provider, auth),
             sse_telemetry: None,
+            max_body_bytes: std::env::var("UNBIASED_MAX_REQUEST_BODY_BYTES")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0),
         }
+    }
+
+    /// Sets a request-body limit for clients that use a size-limited gateway.
+    pub fn with_max_body_bytes(mut self, max_body_bytes: usize) -> Self {
+        self.max_body_bytes = Some(max_body_bytes);
+        self
     }
 
     pub fn with_telemetry(
@@ -54,6 +70,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
         Self {
             session: self.session.with_request_telemetry(request),
             sse_telemetry: sse,
+            max_body_bytes: self.max_body_bytes,
         }
     }
 
@@ -69,7 +86,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
     )]
     pub async fn stream_request(
         &self,
-        request: ResponsesApiRequest,
+        mut request: ResponsesApiRequest,
         options: ResponsesOptions,
     ) -> Result<ResponseStream, ApiError> {
         let ResponsesOptions {
@@ -80,8 +97,14 @@ impl<T: HttpTransport> ResponsesClient<T> {
             compression,
             turn_state,
         } = options;
-        let body = EncodedJsonBody::encode(&request)
-            .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
+        let body = match self.max_body_bytes {
+            Some(max_body_bytes) => {
+                request_body_limit::encode_request(&mut request, max_body_bytes)?
+            }
+            None => EncodedJsonBody::encode(&request).map_err(|e| {
+                ApiError::Stream(format!("failed to encode responses request: {e}"))
+            })?,
+        };
 
         let mut headers = extra_headers;
         if let Some(ref thread_id) = thread_id {
@@ -92,8 +115,25 @@ impl<T: HttpTransport> ResponsesClient<T> {
             insert_header(&mut headers, "x-openai-subagent", &subagent);
         }
 
-        self.stream_encoded(body, headers, compression, turn_state)
-            .await
+        let result = self
+            .stream_encoded(body, headers.clone(), compression, turn_state.clone())
+            .await;
+        if matches!(
+            result,
+            Err(ApiError::Transport(TransportError::Http {
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+                ..
+            }))
+        ) && let Some(max_body_bytes) = self.max_body_bytes
+            && request_body_limit::omit_oldest_inline_media(&mut request).is_some()
+        {
+            tracing::warn!("retrying 413 response once with one more older media item omitted");
+            let body = request_body_limit::encode_request(&mut request, max_body_bytes)?;
+            return self
+                .stream_encoded(body, headers, compression, turn_state)
+                .await;
+        }
+        result
     }
 
     #[instrument(
@@ -116,6 +156,16 @@ impl<T: HttpTransport> ResponsesClient<T> {
     ) -> Result<ResponseStream, ApiError> {
         let body = EncodedJsonBody::encode(&body)
             .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
+        if let Some(max_body_bytes) = self.max_body_bytes
+            && body.as_bytes().len() > max_body_bytes
+        {
+            return Err(ApiError::InvalidRequest {
+                message: format!(
+                    "response request is {} bytes, above the {max_body_bytes}-byte limit",
+                    body.as_bytes().len()
+                ),
+            });
+        }
         self.stream_encoded(body, extra_headers, compression, turn_state)
             .await
     }

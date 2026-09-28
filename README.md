@@ -1,3 +1,9 @@
+> **Unbiased app-server fork.** Circuit & Chisel maintains this fork of
+> [OpenAI Codex](https://github.com/openai/codex) for the Unbiased desktop app.
+> The full upstream workspace remains because app-server uses shared crates.
+> This is not an OpenAI release or an OpenAI-endorsed product. See [LICENSE](LICENSE)
+> and [NOTICE](NOTICE) for attribution. The upstream README follows.
+
 <p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
 <p align="center">
   <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
