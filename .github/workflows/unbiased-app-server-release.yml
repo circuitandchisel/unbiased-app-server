@@ -37,6 +37,8 @@ jobs:
           [[ "$GITHUB_REF_NAME" =~ ^unbiased-app-server-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           git fetch origin main
           test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+          release_version="${GITHUB_REF_NAME#unbiased-app-server-v}"
+          test "$release_version" = "$(cat codex-rs/app-server/UNBIASED_VERSION)"
 
   build:
     needs: verify-tag
@@ -95,6 +97,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export UNBIASED_APP_SERVER_VERSION="$(cat app-server/UNBIASED_VERSION)"
           export STABLE_GIT_COMMIT="$(git rev-parse HEAD)"
           cargo build --locked --release --target "$TARGET" --bin codex-app-server
           mkdir -p "$GITHUB_WORKSPACE/release"

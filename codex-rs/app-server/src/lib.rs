@@ -83,6 +83,16 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::Registry;
 use tracing_subscriber::util::SubscriberInitExt;
 
+/// Version reported by the Unbiased app-server binary and runtime metadata.
+///
+/// The upstream Rust workspace intentionally carries `0.0.0`; our release
+/// workflow stamps this value from `app-server/UNBIASED_VERSION` so promoted
+/// artifacts report the same version as their release tag.
+pub const APP_SERVER_VERSION: &str = match option_env!("UNBIASED_APP_SERVER_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 const SQLITE_RECOVERY_CONFIG_WARNING_SUMMARY: &str = "Codex rebuilt its local database.";
 
 fn is_unsupported_untrusted_approval_policy_error(err: &std::io::Error) -> bool {
@@ -632,7 +642,7 @@ pub async fn run_main_with_transport_options(
 
     let otel = codex_core::otel_init::build_provider(
         &config,
-        env!("CARGO_PKG_VERSION"),
+        APP_SERVER_VERSION,
         Some(OTEL_SERVICE_NAME),
         default_analytics_enabled,
     )
