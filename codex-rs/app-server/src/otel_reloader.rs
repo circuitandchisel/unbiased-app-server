@@ -75,7 +75,7 @@ where
                     };
                     let next_provider = match codex_core::otel_init::build_provider(
                         &config,
-                        env!("CARGO_PKG_VERSION"),
+                        crate::APP_SERVER_VERSION,
                         Some(OTEL_SERVICE_NAME),
                         default_analytics_enabled,
                     ) {
