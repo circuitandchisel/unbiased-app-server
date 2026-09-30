@@ -193,14 +193,24 @@ async fn run_compact_task_inner(
             return Err(error);
         }
     }
-    let result = run_compact_task_inner_impl(
-        Arc::clone(&sess),
-        Arc::clone(&turn_context),
-        input,
-        initial_context_injection,
-        compaction_metadata,
+    let result = if crate::compact_jev::try_compact(
+        &sess,
+        &turn_context,
+        &initial_context_injection,
     )
-    .await;
+    .await
+    {
+        Ok(String::new())
+    } else {
+        run_compact_task_inner_impl(
+            Arc::clone(&sess),
+            Arc::clone(&turn_context),
+            input,
+            initial_context_injection,
+            compaction_metadata,
+        )
+        .await
+    };
     let status = compaction_status_from_result(&result);
     let codex_error = result.as_ref().err();
     if result.is_ok() {
