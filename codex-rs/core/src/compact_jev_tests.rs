@@ -66,7 +66,9 @@ fn jev_drops_a_call_and_its_result_together() {
     let items = history();
     let candidates = collect_candidates(&items);
     assert_eq!(candidates.len(), 1);
-    let retained = apply_answers(&items, &candidates, &answer(0.1, 0.1)).unwrap();
+    let retained = apply_answers(&items, &candidates, &answer(0.1, 0.1), 0, None)
+        .unwrap()
+        .items;
     assert_eq!(retained.len(), items.len() - 2);
     assert_eq!(retained[0], items[0]);
     assert_eq!(retained[1..], items[3..]);
@@ -76,7 +78,9 @@ fn jev_drops_a_call_and_its_result_together() {
 fn jev_shortens_only_the_result_when_the_call_matters() {
     let items = history();
     let candidates = collect_candidates(&items);
-    let retained = apply_answers(&items, &candidates, &answer(0.9, 0.1)).unwrap();
+    let retained = apply_answers(&items, &candidates, &answer(0.9, 0.1), 0, None)
+        .unwrap()
+        .items;
     assert_eq!(retained.len(), items.len());
     assert_eq!(retained[1], items[1]);
     let ResponseItem::FunctionCallOutput { output, .. } = &retained[2].item else {
@@ -88,17 +92,89 @@ fn jev_shortens_only_the_result_when_the_call_matters() {
 }
 
 #[test]
+fn adaptive_pruning_stops_when_the_byte_target_is_met() {
+    let mut items = vec![message("user", "Find the bug")];
+    for id in ["low", "medium", "protected"] {
+        items.extend([call(id), output(id)]);
+    }
+    items.extend((0..6).map(|index| message("assistant", &format!("Recent {index}"))));
+    let candidates = collect_candidates(&items);
+    let response = JevResponse {
+        answers: HashMap::from([
+            ("call_t0".to_string(), JevAnswer { noul: 0.9 }),
+            ("result_t0".to_string(), JevAnswer { noul: 0.55 }),
+            ("call_t1".to_string(), JevAnswer { noul: 0.9 }),
+            ("result_t1".to_string(), JevAnswer { noul: 0.65 }),
+            ("call_t2".to_string(), JevAnswer { noul: 0.9 }),
+            ("result_t2".to_string(), JevAnswer { noul: 0.85 }),
+        ]),
+    };
+
+    let applied = apply_answers(&items, &candidates, &response, 8_000, None).unwrap();
+    assert_eq!(applied.adaptive_result_count, 2);
+    assert_eq!(applied.items[1], items[1]);
+    assert_eq!(applied.items[3], items[3]);
+    assert_eq!(applied.items[5], items[5]);
+    assert_eq!(applied.items[6], items[6]);
+    assert_eq!(&applied.items[7..], &items[7..]);
+    assert!(
+        serialized_item_bytes(&items).unwrap() - serialized_item_bytes(&applied.items).unwrap()
+            >= 8_000
+    );
+}
+
+#[test]
+fn adaptive_pruning_cannot_cut_high_scoring_results_to_force_the_target() {
+    let items = history();
+    let candidates = collect_candidates(&items);
+    let applied = apply_answers(&items, &candidates, &answer(0.9, 0.85), 4_000, None).unwrap();
+    assert_eq!(applied.adaptive_result_count, 0);
+    assert_eq!(applied.items, items);
+}
+
+#[test]
+fn token_budget_can_trigger_adaptive_pruning_after_byte_target_is_met() {
+    let items = history();
+    let candidates = collect_candidates(&items);
+    let original_tokens = items
+        .iter()
+        .map(|item| estimate_item_token_count(&item.item))
+        .sum::<i64>();
+    let applied = apply_answers(
+        &items,
+        &candidates,
+        &answer(0.9, 0.6),
+        0,
+        Some(original_tokens),
+    )
+    .unwrap();
+    assert_eq!(applied.adaptive_result_count, 1);
+    assert_eq!(applied.items[1], items[1]);
+    assert_eq!(&applied.items[3..], &items[3..]);
+    assert!(
+        applied
+            .items
+            .iter()
+            .map(|item| estimate_item_token_count(&item.item))
+            .sum::<i64>()
+            < original_tokens
+    );
+}
+
+#[test]
 fn invalid_or_missing_answers_cannot_change_history() {
     let items = history();
     let candidates = collect_candidates(&items);
-    assert!(apply_answers(&items, &candidates, &answer(f64::NAN, 0.0)).is_err());
+    assert!(apply_answers(&items, &candidates, &answer(f64::NAN, 0.0), 0, None).is_err());
     assert!(
         apply_answers(
             &items,
             &candidates,
             &JevResponse {
                 answers: HashMap::new()
-            }
+            },
+            0,
+            None,
         )
         .is_err()
     );
@@ -231,7 +307,9 @@ async fn batched_scores_rewrite_only_selected_old_text_results() {
     .await
     .unwrap();
     assert_eq!(scores.answers.len(), 160);
-    let retained = apply_answers(&items, &candidates, &scores).unwrap();
+    let retained = apply_answers(&items, &candidates, &scores, 0, None)
+        .unwrap()
+        .items;
     assert_eq!(retained.len(), items.len());
     assert_eq!(&retained[retained.len() - 6..], &items[items.len() - 6..]);
     let ResponseItem::FunctionCallOutput { output, .. } = &retained[2].item else {

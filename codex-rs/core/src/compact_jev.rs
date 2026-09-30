@@ -32,6 +32,7 @@ const MAX_REQUEST_BYTES: usize = 30 * 1024;
 const MIN_SAVED_BYTES: usize = 4_096;
 const MAX_RETAINED_BYTES: usize = 6 * 1024 * 1024;
 const MAX_JEV_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_ADAPTIVE_RESULT_SCORE: f64 = 0.75;
 
 struct Candidate {
     call_index: usize,
@@ -47,6 +48,33 @@ struct StateLine {
     text: String,
     removable: bool,
     candidate_index: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+enum HistoryEdit {
+    Keep,
+    Shorten,
+    DropPair,
+}
+
+struct AppliedAnswers {
+    items: Vec<ResponseItemEnvelope>,
+    adaptive_result_count: usize,
+}
+
+struct AdaptiveOption {
+    candidate_index: usize,
+    result_score: f64,
+    bytes_saved: usize,
+    tokens_saved: i64,
+}
+
+pub(crate) struct JevPreview {
+    pub(crate) history: Vec<ResponseItemEnvelope>,
+    pub(crate) original_bytes: usize,
+    pub(crate) retained_bytes: usize,
+    pub(crate) candidate_count: usize,
+    pub(crate) adaptive_result_count: usize,
 }
 
 #[derive(Deserialize)]
@@ -68,6 +96,7 @@ pub(crate) async fn try_compact(
         return false;
     }
     let Ok(url) = std::env::var("UNBIASED_JEV_URL") else {
+        tracing::info!(reason = "url_not_configured", "Jev compaction skipped");
         return false;
     };
     let Ok(key) = std::env::var("UNBIASED_API_KEY") else {
@@ -92,39 +121,23 @@ async fn compact_with_jev(
     key: &str,
 ) -> Result<bool, &'static str> {
     let snapshot = sess.clone_history().await;
-    let items = snapshot.annotated_items();
-    let candidates = collect_candidates(items);
-    if candidates.is_empty() {
+    let Some(preview) = plan_compact(turn_context, snapshot.annotated_items(), url, key).await?
+    else {
         return Ok(false);
-    }
-
-    let state = build_state(items, &candidates)?;
-    let batches = build_question_batches(&state, &candidates)?;
-    let factory = turn_context.config.http_client_factory();
-    let answer = score_batches(&factory, url, key, &state, &batches).await?;
-    let mut retained = apply_answers(items, &candidates, &answer)?;
-    let original_bytes = serialized_item_bytes(items)?;
-    let retained_bytes = serialized_item_bytes(&retained)?;
-    if retained_bytes > MAX_RETAINED_BYTES
-        || original_bytes.saturating_sub(retained_bytes) < MIN_SAVED_BYTES
-        || retained_bytes.saturating_mul(4) > original_bytes.saturating_mul(3)
-    {
-        return Ok(false);
-    }
-    if let Some(limit) = turn_context.model_info().auto_compact_token_limit() {
-        let retained_tokens = retained
-            .iter()
-            .map(|item| estimate_item_token_count(&item.item))
-            .sum::<i64>();
-        if retained_tokens >= limit.saturating_mul(4) / 5 {
-            return Ok(false);
-        }
-    }
-
+    };
+    let mut retained = preview.history;
     let (initial_context, world_state_baseline) =
         build_compaction_initial_context(sess.as_ref(), initial_context_injection).await;
     retained = insert_initial_context_before_last_real_user_or_summary(retained, initial_context);
-    if serialized_item_bytes(&retained)? > MAX_RETAINED_BYTES {
+    let retained_with_context_bytes = serialized_item_bytes(&retained)?;
+    if retained_with_context_bytes > MAX_RETAINED_BYTES {
+        tracing::info!(
+            reason = "history_with_context_too_large",
+            candidate_count = preview.candidate_count,
+            retained_with_context_bytes,
+            adaptive_result_count = preview.adaptive_result_count,
+            "Jev compaction skipped"
+        );
         return Ok(false);
     }
     let item = TurnItem::ContextCompaction(ContextCompactionItem::new());
@@ -152,8 +165,128 @@ async fn compact_with_jev(
     .await;
     sess.recompute_token_usage(turn_context).await;
     sess.emit_turn_item_completed(turn_context, item).await;
-    tracing::info!(original_bytes, retained_bytes, "Jev compaction installed");
+    tracing::info!(
+        candidate_count = preview.candidate_count,
+        original_bytes = preview.original_bytes,
+        retained_bytes = preview.retained_bytes,
+        saved_bytes = preview
+            .original_bytes
+            .saturating_sub(preview.retained_bytes),
+        adaptive_result_count = preview.adaptive_result_count,
+        "Jev compaction installed"
+    );
     Ok(true)
+}
+
+pub(crate) async fn preview_compact(
+    turn_context: &Arc<TurnContext>,
+    items: &[ResponseItemEnvelope],
+) -> Result<Option<JevPreview>, &'static str> {
+    if turn_context.config.model_provider_id != "unbiased" {
+        return Err("Jev is unavailable for this provider");
+    }
+    let url = std::env::var("UNBIASED_JEV_URL").map_err(|_| "Jev URL is unavailable")?;
+    let key = std::env::var("UNBIASED_API_KEY").map_err(|_| "Unbiased API key is unavailable")?;
+    plan_compact(turn_context, items, &url, &key).await
+}
+
+async fn plan_compact(
+    turn_context: &Arc<TurnContext>,
+    items: &[ResponseItemEnvelope],
+    url: &str,
+    key: &str,
+) -> Result<Option<JevPreview>, &'static str> {
+    let candidates = collect_candidates(items);
+    if candidates.is_empty() {
+        tracing::info!(
+            reason = "no_eligible_tool_results",
+            item_count = items.len(),
+            "Jev compaction skipped"
+        );
+        return Ok(None);
+    }
+
+    let state = build_state(items, &candidates)?;
+    let batches = build_question_batches(&state, &candidates)?;
+    let factory = turn_context.config.http_client_factory();
+    let answer = score_batches(&factory, url, key, &state, &batches).await?;
+    let original_bytes = serialized_item_bytes(items)?;
+    let required_saved_bytes = MIN_SAVED_BYTES
+        .max(original_bytes.div_ceil(4))
+        .max(original_bytes.saturating_sub(MAX_RETAINED_BYTES));
+    let token_budget = turn_context
+        .model_info()
+        .auto_compact_token_limit()
+        .map(|limit| limit.saturating_mul(4) / 5);
+    let applied = apply_answers(
+        items,
+        &candidates,
+        &answer,
+        required_saved_bytes,
+        token_budget,
+    )?;
+    let retained = applied.items;
+    let retained_bytes = serialized_item_bytes(&retained)?;
+    let saved_bytes = original_bytes.saturating_sub(retained_bytes);
+    if retained_bytes > MAX_RETAINED_BYTES {
+        tracing::info!(
+            reason = "retained_history_too_large",
+            candidate_count = candidates.len(),
+            original_bytes,
+            retained_bytes,
+            adaptive_result_count = applied.adaptive_result_count,
+            "Jev compaction skipped"
+        );
+        return Ok(None);
+    }
+    if saved_bytes < MIN_SAVED_BYTES {
+        tracing::info!(
+            reason = "insufficient_bytes_saved",
+            candidate_count = candidates.len(),
+            original_bytes,
+            retained_bytes,
+            saved_bytes,
+            adaptive_result_count = applied.adaptive_result_count,
+            "Jev compaction skipped"
+        );
+        return Ok(None);
+    }
+    if retained_bytes.saturating_mul(4) > original_bytes.saturating_mul(3) {
+        tracing::info!(
+            reason = "insufficient_fraction_saved",
+            candidate_count = candidates.len(),
+            original_bytes,
+            retained_bytes,
+            saved_bytes,
+            adaptive_result_count = applied.adaptive_result_count,
+            "Jev compaction skipped"
+        );
+        return Ok(None);
+    }
+    if let Some(token_budget) = token_budget {
+        let retained_tokens = retained
+            .iter()
+            .map(|item| estimate_item_token_count(&item.item))
+            .sum::<i64>();
+        if retained_tokens >= token_budget {
+            tracing::info!(
+                reason = "retained_history_over_token_budget",
+                candidate_count = candidates.len(),
+                retained_tokens,
+                token_budget,
+                adaptive_result_count = applied.adaptive_result_count,
+                "Jev compaction skipped"
+            );
+            return Ok(None);
+        }
+    }
+    Ok(Some(JevPreview {
+        history: retained,
+        original_bytes,
+        retained_bytes,
+        candidate_count: candidates.len(),
+        adaptive_result_count: applied.adaptive_result_count,
+    }))
 }
 
 async fn score_batches(
@@ -459,9 +592,11 @@ fn apply_answers(
     items: &[ResponseItemEnvelope],
     candidates: &[Candidate],
     response: &JevResponse,
-) -> Result<Vec<ResponseItemEnvelope>, &'static str> {
-    let mut drop = vec![false; items.len()];
-    let mut shorten = vec![false; items.len()];
+    required_saved_bytes: usize,
+    token_budget: Option<i64>,
+) -> Result<AppliedAnswers, &'static str> {
+    let mut edits = vec![HistoryEdit::Keep; candidates.len()];
+    let mut adaptive = Vec::new();
     for (index, candidate) in candidates.iter().enumerate() {
         let score = |kind: &str| -> Result<f64, &'static str> {
             let name = format!("{kind}_t{index}");
@@ -477,38 +612,120 @@ fn apply_answers(
         };
         let call = score("call")?;
         let result = score("result")?;
-        if result >= 0.5 {
-            continue;
-        }
-        if call >= 0.5 {
-            shorten[candidate.result_index] = true;
-        } else {
-            drop[candidate.call_index] = true;
-            drop[candidate.result_index] = true;
-        }
-    }
-    Ok(items.iter().enumerate().filter_map(|(index, envelope)| {
-        if drop[index] {
-            return None;
-        }
-        let mut retained = envelope.clone();
-        if shorten[index] {
-            match &mut retained.item {
-                ResponseItem::FunctionCallOutput { output, .. }
-                | ResponseItem::CustomToolCallOutput { output, .. } => {
-                    let head = match &output.body {
-                        FunctionCallOutputBody::Text(text) => prefix(text, 300),
-                        FunctionCallOutputBody::ContentItems(_) => String::new(),
-                    };
-                    output.body = FunctionCallOutputBody::Text(format!(
-                        "{head}\n[Earlier tool result truncated by compaction; run the tool again if needed]"
-                    ));
-                }
-                _ => {}
+        if result < 0.5 {
+            edits[index] = if call < 0.5 {
+                HistoryEdit::DropPair
+            } else {
+                HistoryEdit::Shorten
+            };
+        } else if result < MAX_ADAPTIVE_RESULT_SCORE {
+            let shortened = shortened_result(&items[candidate.result_index])?;
+            let original = &items[candidate.result_index].item;
+            let original_bytes = serde_json::to_vec(original)
+                .map_err(|_| "could not measure compaction size")?
+                .len();
+            let shortened_bytes = serde_json::to_vec(&shortened.item)
+                .map_err(|_| "could not measure compaction size")?
+                .len();
+            let bytes_saved = original_bytes.saturating_sub(shortened_bytes);
+            if bytes_saved > 0 {
+                adaptive.push(AdaptiveOption {
+                    candidate_index: index,
+                    result_score: result,
+                    bytes_saved,
+                    tokens_saved: estimate_item_token_count(original)
+                        - estimate_item_token_count(&shortened.item),
+                });
             }
         }
-        Some(retained)
-    }).collect())
+    }
+
+    let mut retained = apply_edits(items, candidates, &edits)?;
+    let original_bytes = serialized_item_bytes(items)?;
+    let mut saved_bytes = original_bytes.saturating_sub(serialized_item_bytes(&retained)?);
+    let mut retained_tokens = token_budget.map(|_| {
+        retained
+            .iter()
+            .map(|item| estimate_item_token_count(&item.item))
+            .sum::<i64>()
+    });
+    adaptive.sort_by(|a, b| {
+        a.result_score
+            .total_cmp(&b.result_score)
+            .then_with(|| b.bytes_saved.cmp(&a.bytes_saved))
+    });
+    let mut adaptive_result_count = 0;
+    for option in adaptive {
+        if saved_bytes >= required_saved_bytes
+            && retained_tokens
+                .zip(token_budget)
+                .is_none_or(|(retained, budget)| retained < budget)
+        {
+            break;
+        }
+        edits[option.candidate_index] = HistoryEdit::Shorten;
+        saved_bytes = saved_bytes.saturating_add(option.bytes_saved);
+        if let Some(tokens) = &mut retained_tokens {
+            *tokens -= option.tokens_saved;
+        }
+        adaptive_result_count += 1;
+    }
+    if adaptive_result_count > 0 {
+        retained = apply_edits(items, candidates, &edits)?;
+    }
+    Ok(AppliedAnswers {
+        items: retained,
+        adaptive_result_count,
+    })
+}
+
+fn apply_edits(
+    items: &[ResponseItemEnvelope],
+    candidates: &[Candidate],
+    edits: &[HistoryEdit],
+) -> Result<Vec<ResponseItemEnvelope>, &'static str> {
+    let mut drop = vec![false; items.len()];
+    let mut shorten = vec![false; items.len()];
+    for (candidate, edit) in candidates.iter().zip(edits) {
+        match edit {
+            HistoryEdit::Keep => {}
+            HistoryEdit::Shorten => shorten[candidate.result_index] = true,
+            HistoryEdit::DropPair => {
+                drop[candidate.call_index] = true;
+                drop[candidate.result_index] = true;
+            }
+        }
+    }
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, envelope)| {
+            if drop[index] {
+                None
+            } else if shorten[index] {
+                Some(shortened_result(envelope))
+            } else {
+                Some(Ok(envelope.clone()))
+            }
+        })
+        .collect()
+}
+
+fn shortened_result(envelope: &ResponseItemEnvelope) -> Result<ResponseItemEnvelope, &'static str> {
+    let mut shortened = envelope.clone();
+    let output = match &mut shortened.item {
+        ResponseItem::FunctionCallOutput { output, .. }
+        | ResponseItem::CustomToolCallOutput { output, .. } => output,
+        _ => return Err("Jev candidate is not a tool result"),
+    };
+    let FunctionCallOutputBody::Text(text) = &output.body else {
+        return Err("Jev candidate is not a text result");
+    };
+    output.body = FunctionCallOutputBody::Text(format!(
+        "{}\n[Earlier tool result truncated by compaction; run the tool again if needed]",
+        prefix(text, 300)
+    ));
+    Ok(shortened)
 }
 
 fn serialized_item_bytes(items: &[ResponseItemEnvelope]) -> Result<usize, &'static str> {
