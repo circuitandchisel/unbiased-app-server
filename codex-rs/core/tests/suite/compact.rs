@@ -97,6 +97,55 @@ const NEW_GLOBAL_INSTRUCTIONS: &str = "new global instructions";
 const OLD_GLOBAL_INSTRUCTIONS: &str = "old global instructions";
 const REMOTE_V2_SUMMARY: &str = "global-instructions-remote-v2-summary";
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unbiased_compacts_older_history_before_a_new_turn_exceeds_body_budget() {
+    skip_if_no_network!();
+    let server = start_mock_server().await;
+    let first = sse(vec![
+        ev_assistant_message("large", &"x".repeat(6_500_000)),
+        ev_completed("first"),
+    ]);
+    let summary = sse(vec![
+        ev_assistant_message("summary", "Earlier work summarized"),
+        ev_completed("compact"),
+    ]);
+    let second = sse(vec![
+        ev_assistant_message("reply", "Done"),
+        ev_completed("second"),
+    ]);
+    let requests = mount_sse_sequence(&server, vec![first, summary, second]).await;
+    let provider = non_openai_model_provider(&server);
+    let test = test_codex()
+        .with_config(move |config| {
+            config.model_provider = provider;
+            config.model_provider_id = "unbiased".to_string();
+            config.model_context_window = Some(20_000_000);
+            config.model_auto_compact_token_limit = Some(10_000_000);
+            config.model_post_turn_compact_threshold_percent = 0;
+            set_test_compact_prompt(config);
+        })
+        .build(&server)
+        .await
+        .expect("build codex");
+
+    test.submit_turn("Initial task").await.expect("first turn");
+    test.submit_turn(&"y".repeat(700_000))
+        .await
+        .expect("second turn");
+
+    let recorded = requests.requests();
+    assert_eq!(recorded.len(), 3);
+    assert!(body_contains_text(
+        &recorded[1].body_json().to_string(),
+        SUMMARIZATION_PROMPT
+    ));
+    assert!(body_contains_text(
+        &recorded[2].body_json().to_string(),
+        "Earlier work summarized"
+    ));
+    assert!(recorded[2].body_json().to_string().len() < 7 * 1024 * 1024);
+}
+
 pub(super) const COMPACT_WARNING_MESSAGE: &str = "Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.";
 
 fn ev_exec_command_call(call_id: &str, command: &str) -> serde_json::Value {

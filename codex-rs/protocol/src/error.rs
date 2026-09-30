@@ -102,6 +102,10 @@ pub enum CodexErrorDetails {
         "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying."
     )]
     ContextWindowExceeded,
+    #[error(
+        "This chat's request is {bytes} bytes, above Unbiased's 7 MB safety limit. Compact older history or remove a large attachment before retrying."
+    )]
+    RequestBodyTooLarge { bytes: usize },
     #[error("no thread with id: {0}")]
     ThreadNotFound(ThreadId),
     #[error("agent thread limit reached")]
@@ -400,6 +404,7 @@ impl CodexErr {
             | CodexErrorDetails::LandlockSandboxExecutableNotProvided
             | CodexErrorDetails::RetryLimit(_)
             | CodexErrorDetails::ContextWindowExceeded
+            | CodexErrorDetails::RequestBodyTooLarge { .. }
             | CodexErrorDetails::ThreadNotFound(_)
             | CodexErrorDetails::AgentLimitReached { .. }
             | CodexErrorDetails::Spawn
@@ -489,6 +494,7 @@ impl CodexErr {
             | CodexErrorDetails::InternalServerError
             | CodexErrorDetails::InternalAgentDied => CodexErrorInfo::InternalServerError,
             CodexErrorDetails::UnsupportedOperation(_)
+            | CodexErrorDetails::RequestBodyTooLarge { .. }
             | CodexErrorDetails::ThreadNotFound(_)
             | CodexErrorDetails::AgentLimitReached { .. } => CodexErrorInfo::BadRequest,
             CodexErrorDetails::Sandbox(_) => CodexErrorInfo::SandboxError,

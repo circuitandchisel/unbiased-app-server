@@ -151,6 +151,7 @@ use codex_model_provider_info::DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
 use codex_response_debug_context::extract_response_debug_context;
 use codex_response_debug_context::extract_response_debug_context_from_api_error;
@@ -1004,6 +1005,14 @@ impl ModelClient {
             client_metadata: Some(client_metadata),
             access_programs: None,
         };
+        if self.state.provider.info().env_key.as_deref() == Some("UNBIASED_API_KEY") {
+            let bytes = serde_json::to_vec(&request)?.len();
+            if bytes > crate::request_body_budget::UNBIASED_REQUEST_BUDGET_BYTES {
+                return Err(CodexErr::new(CodexErrorDetails::RequestBodyTooLarge {
+                    bytes,
+                }));
+            }
+        }
         Ok(request)
     }
 

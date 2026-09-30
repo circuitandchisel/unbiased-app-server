@@ -185,10 +185,14 @@ pub(crate) async fn run_turn(
         &turn_context,
         &mut client_session,
         &cancellation_token,
+        &input,
     )
     .await
     {
-        // Compaction runs before the new input is recorded, so preserve it on every failure.
+        if matches!(err.details(), CodexErrorDetails::RequestBodyTooLarge { .. }) {
+            return Err(err);
+        }
+        // Compaction runs before the new input is recorded, so preserve it on other failures.
         run_hooks_and_record_inputs(
             &sess,
             &turn_context,
@@ -421,6 +425,7 @@ pub(crate) async fn run_turn(
 
     let mut next_step_context = Some(first_step_context);
     let mut guardian_budget_compacted = false;
+    let mut body_budget_compacted = false;
     loop {
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
@@ -534,6 +539,7 @@ pub(crate) async fn run_turn(
         match sampling_request_result {
             Ok((sampling_request_output, sampling_request_input)) => {
                 guardian_budget_compacted = false;
+                body_budget_compacted = false;
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
@@ -738,6 +744,27 @@ pub(crate) async fn run_turn(
                     }
                     break;
                 }
+                continue;
+            }
+            Err(err)
+                if matches!(err.details(), CodexErrorDetails::RequestBodyTooLarge { .. })
+                    && !body_budget_compacted =>
+            {
+                body_budget_compacted = true;
+                run_auto_compact(
+                    &sess,
+                    Arc::clone(&step_context),
+                    /*fallback_step_context*/ None,
+                    &mut client_session,
+                    InitialContextInjection::BeforeLastUserMessage {
+                        world_state: Arc::clone(&world_state),
+                        step_context: Arc::clone(&step_context),
+                    },
+                    CompactionReason::ContextLimit,
+                    CompactionPhase::MidTurn,
+                )
+                .await?;
+                can_drain_pending_input = false;
                 continue;
             }
             Err(err)
@@ -1280,6 +1307,7 @@ async fn run_pre_sampling_compact(
     turn_context: &Arc<TurnContext>,
     client_session: &mut ModelClientSession,
     cancellation_token: &CancellationToken,
+    pending: &[TurnInput],
 ) -> CodexResult<()> {
     maybe_run_previous_model_inline_compact(sess, turn_context, client_session, cancellation_token)
         .await?;
@@ -1302,6 +1330,47 @@ async fn run_pre_sampling_compact(
             CompactionPhase::PreTurn,
         )
         .await?;
+    }
+    if turn_context.config.model_provider_id == "unbiased" {
+        let budget = crate::request_body_budget::UNBIASED_REQUEST_BUDGET_BYTES;
+        let history = sess.clone_history().await;
+        let (estimated, incoming_bytes) =
+            crate::request_body_budget::estimate_turn_bytes(history.annotated_items(), pending)?;
+        if incoming_bytes > budget {
+            return Err(CodexErr::new(CodexErrorDetails::RequestBodyTooLarge {
+                bytes: incoming_bytes,
+            }));
+        }
+        if estimated > budget {
+            if history.annotated_items().is_empty() {
+                return Err(CodexErr::new(CodexErrorDetails::RequestBodyTooLarge {
+                    bytes: estimated,
+                }));
+            }
+            let step_context = sess
+                .capture_step_context(Arc::clone(turn_context), cancellation_token)
+                .await?;
+            run_auto_compact(
+                sess,
+                step_context,
+                /*fallback_step_context*/ None,
+                client_session,
+                InitialContextInjection::DoNotInject,
+                CompactionReason::ContextLimit,
+                CompactionPhase::PreTurn,
+            )
+            .await?;
+            let history = sess.clone_history().await;
+            let (remaining, _) = crate::request_body_budget::estimate_turn_bytes(
+                history.annotated_items(),
+                pending,
+            )?;
+            if remaining > budget {
+                return Err(CodexErr::new(CodexErrorDetails::RequestBodyTooLarge {
+                    bytes: remaining,
+                }));
+            }
+        }
     }
     Ok(())
 }
