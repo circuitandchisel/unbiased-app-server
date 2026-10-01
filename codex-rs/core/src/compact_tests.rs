@@ -700,3 +700,45 @@ fn insert_initial_context_before_last_real_user_or_summary_keeps_compaction_last
     ];
     assert_eq!(refreshed, expected);
 }
+
+#[test]
+fn local_compaction_comparison_report_is_private_and_keeps_both_proposals() -> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    let dir = root.path().join("comparisons");
+    let before = vec![ResponseItemEnvelope::new(user_message(
+        "Review the repository",
+    ))];
+    let jev_history = before.clone();
+    let builtin_history = vec![ResponseItemEnvelope::new(user_message("Summary"))];
+    let jev = Ok(Some(crate::compact_jev::JevPreview {
+        history: jev_history,
+        original_bytes: 100,
+        retained_bytes: 80,
+        candidate_count: 2,
+        adaptive_result_count: 1,
+    }));
+
+    let path = write_compaction_comparison(
+        &dir,
+        "thread-1",
+        "turn-1",
+        &before,
+        &jev,
+        Some(&builtin_history),
+        7,
+        23,
+    )?;
+    let report: serde_json::Value = serde_json::from_slice(&fs::read(path.clone())?)?;
+    assert_eq!(report["mode"], "built_in_live_jev_shadow");
+    assert_eq!(report["before"]["history"].as_array().unwrap().len(), 1);
+    assert_eq!(report["jev"]["status"], "proposed");
+    assert_eq!(report["jev"]["history"].as_array().unwrap().len(), 1);
+    assert_eq!(report["built_in"]["status"], "installed");
+    assert_eq!(report["built_in"]["history"].as_array().unwrap().len(), 1);
+    #[cfg(unix)]
+    {
+        assert_eq!(fs::metadata(&dir)?.permissions().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(path)?.permissions().mode() & 0o777, 0o600);
+    }
+    Ok(())
+}

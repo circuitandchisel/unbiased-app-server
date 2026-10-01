@@ -1,5 +1,17 @@
+use std::fs;
+use std::io;
+use std::io::Write;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+
+#[cfg(unix)]
+use std::os::unix::fs::DirBuilderExt;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use crate::Prompt;
 use crate::client::ModelClientSession;
@@ -7,6 +19,7 @@ use crate::client_common::ResponseEvent;
 use crate::context::CompactionSummary;
 use crate::context::ContextualUserFragment;
 use crate::context::world_state::WorldState;
+use crate::context_manager::ContextManager;
 use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
@@ -193,12 +206,50 @@ async fn run_compact_task_inner(
             return Err(error);
         }
     }
-    let result = if crate::compact_jev::try_compact(
-        &sess,
-        &turn_context,
-        &initial_context_injection,
-    )
-    .await
+    let compare_dir = (matches!(trigger, CompactionTrigger::Manual)
+        && turn_context.config.model_provider_id == "unbiased")
+        .then(|| std::env::var_os("UNBIASED_COMPACTION_COMPARE_DIR"))
+        .flatten()
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+    let result = if let Some(dir) = compare_dir {
+        let before = sess.clone_history().await;
+        let jev_started = Instant::now();
+        let jev =
+            crate::compact_jev::preview_compact(&turn_context, before.annotated_items()).await;
+        let jev_ms = jev_started.elapsed().as_millis();
+        let builtin_started = Instant::now();
+        let result = run_compact_task_inner_impl(
+            Arc::clone(&sess),
+            Arc::clone(&turn_context),
+            input,
+            initial_context_injection,
+            compaction_metadata,
+            Some(before.clone()),
+        )
+        .await;
+        let builtin_ms = builtin_started.elapsed().as_millis();
+        let after = if result.is_ok() {
+            Some(sess.clone_history().await)
+        } else {
+            None
+        };
+        match write_compaction_comparison(
+            &dir,
+            &sess.thread_id().to_string(),
+            &turn_context.sub_id.to_string(),
+            before.annotated_items(),
+            &jev,
+            after.as_ref().map(ContextManager::annotated_items),
+            jev_ms,
+            builtin_ms,
+        ) {
+            Ok(path) => tracing::info!(path = %path.display(), "Compaction comparison saved"),
+            Err(error) => tracing::warn!(%error, "Could not save local compaction comparison"),
+        }
+        result
+    } else if crate::compact_jev::try_compact(&sess, &turn_context, &initial_context_injection)
+        .await
     {
         Ok(String::new())
     } else {
@@ -208,6 +259,7 @@ async fn run_compact_task_inner(
             input,
             initial_context_injection,
             compaction_metadata,
+            None,
         )
         .await
     };
@@ -252,19 +304,120 @@ async fn run_compact_task_inner(
     result.map(|_| ())
 }
 
+fn write_compaction_comparison(
+    dir: &Path,
+    thread_id: &str,
+    turn_id: &str,
+    before: &[ResponseItemEnvelope],
+    jev: &Result<Option<crate::compact_jev::JevPreview>, &'static str>,
+    after: Option<&[ResponseItemEnvelope]>,
+    jev_ms: u128,
+    builtin_ms: u128,
+) -> io::Result<PathBuf> {
+    if !dir.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "compaction comparison directory must be absolute",
+        ));
+    }
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder.create(dir)?;
+    #[cfg(unix)]
+    if fs::metadata(dir)?.permissions().mode() & 0o077 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "compaction comparison directory is not private",
+        ));
+    }
+
+    let history = |items: &[ResponseItemEnvelope]| {
+        items
+            .iter()
+            .map(|envelope| {
+                serde_json::json!({
+                    "item": envelope.item,
+                    "metadata": envelope.metadata,
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let bytes = |items: &[ResponseItemEnvelope]| -> io::Result<usize> {
+        items.iter().try_fold(0usize, |total, envelope| {
+            serde_json::to_vec(&envelope.item)
+                .map(|encoded| total.saturating_add(encoded.len()))
+                .map_err(io::Error::other)
+        })
+    };
+    let jev_report = match jev {
+        Ok(Some(preview)) => serde_json::json!({
+            "status": "proposed",
+            "duration_ms": jev_ms,
+            "candidate_count": preview.candidate_count,
+            "adaptive_result_count": preview.adaptive_result_count,
+            "original_item_bytes": preview.original_bytes,
+            "retained_item_bytes": preview.retained_bytes,
+            "history": history(&preview.history),
+        }),
+        Ok(None) => serde_json::json!({"status": "skipped", "duration_ms": jev_ms}),
+        Err(reason) => serde_json::json!({
+            "status": "error",
+            "duration_ms": jev_ms,
+            "reason": reason,
+        }),
+    };
+    let builtin_report = match after {
+        Some(after) => serde_json::json!({
+            "status": "installed",
+            "duration_ms": builtin_ms,
+            "retained_item_bytes": bytes(after)?,
+            "history": history(after),
+        }),
+        None => serde_json::json!({"status": "error", "duration_ms": builtin_ms}),
+    };
+    let report = serde_json::json!({
+        "schema_version": 1,
+        "mode": "built_in_live_jev_shadow",
+        "thread_id": thread_id,
+        "turn_id": turn_id,
+        "before": {
+            "item_bytes": bytes(before)?,
+            "history": history(before),
+        },
+        "jev": jev_report,
+        "built_in": builtin_report,
+    });
+    let encoded = serde_json::to_vec_pretty(&report).map_err(io::Error::other)?;
+    let path = dir.join(format!("{thread_id}-{turn_id}.json"));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&path)?;
+    file.write_all(&encoded)?;
+    file.sync_all()?;
+    Ok(path)
+}
+
 async fn run_compact_task_inner_impl(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
     input: Vec<UserInput>,
     initial_context_injection: InitialContextInjection,
     compaction_metadata: CompactionTurnMetadata,
+    history_override: Option<ContextManager>,
 ) -> CodexResult<String> {
     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
     sess.emit_turn_item_started(&turn_context, &compaction_item)
         .await;
     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
 
-    let mut history = sess.clone_history().await;
+    let mut history = match history_override {
+        Some(history) => history,
+        None => sess.clone_history().await,
+    };
     history.record_items(
         &[initial_input_for_turn.into()],
         turn_context.model_info().truncation_policy.into(),
