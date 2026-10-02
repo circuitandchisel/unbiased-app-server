@@ -265,6 +265,20 @@ fn model_context_window_override_clamps_to_max_context_window() {
 }
 
 #[test]
+fn unknown_model_accepts_explicit_context_window_override() {
+    let model = model_info_from_slug("pareto-26.10-preview");
+    let config = ModelsManagerConfig {
+        model_context_window: Some(1_048_576),
+        ..Default::default()
+    };
+
+    let updated = with_config_overrides(model, &config);
+
+    assert_eq!(updated.context_window, Some(1_048_576));
+    assert_eq!(updated.usable_context_window(), Some(996_147));
+}
+
+#[test]
 fn model_context_window_uses_model_value_without_override() {
     let mut model = model_info_from_slug("unknown-model");
     model.context_window = Some(273_000);
