@@ -13864,6 +13864,23 @@
       ],
       "type": "string"
     },
+    "PromptComponentTokenEstimate": {
+      "properties": {
+        "systemInstructionsTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "toolDefinitionsTokens": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "systemInstructionsTokens",
+        "toolDefinitionsTokens"
+      ],
+      "type": "object"
+    },
     "QueuedSubmission": {
       "properties": {
         "clientUserMessageId": {
@@ -14103,6 +14120,16 @@
       "$schema": "http://json-schema.org/draft-07/schema#",
       "description": "Internal-only notification containing the exact usage from one upstream Responses API completion.",
       "properties": {
+        "promptComponents": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PromptComponentTokenEstimate"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "responseId": {
           "type": "string"
         },

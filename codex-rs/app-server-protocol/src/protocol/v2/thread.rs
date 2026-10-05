@@ -1892,6 +1892,25 @@ pub struct RawResponseCompletedNotification {
     pub response_id: String,
     pub usage: Option<TokenUsageBreakdown>,
     pub usage_metadata: Option<ResponseUsageMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_components: Option<PromptComponentTokenEstimate>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct PromptComponentTokenEstimate {
+    pub system_instructions_tokens: i64,
+    pub tool_definitions_tokens: i64,
+}
+
+impl From<codex_protocol::protocol::PromptComponentTokenEstimate> for PromptComponentTokenEstimate {
+    fn from(value: codex_protocol::protocol::PromptComponentTokenEstimate) -> Self {
+        Self {
+            system_instructions_tokens: value.system_instructions_tokens,
+            tool_definitions_tokens: value.tool_definitions_tokens,
+        }
+    }
 }
 
 /// Usage metadata reported for one upstream response.
