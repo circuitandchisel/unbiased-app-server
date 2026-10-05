@@ -101,6 +101,7 @@ use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::PlanDeltaEvent;
+use codex_protocol::protocol::PromptComponentTokenEstimate;
 use codex_protocol::protocol::ReasoningContentDeltaEvent;
 use codex_protocol::protocol::ReasoningRawContentDeltaEvent;
 use codex_protocol::protocol::SafetyBufferingEvent;
@@ -119,6 +120,7 @@ use codex_thread_store::PersistContext;
 use codex_tools::DiscoverableTool;
 use codex_tools::ToolName;
 use codex_tools::filter_request_plugin_install_discoverable_tools_for_client;
+use codex_utils_output_truncation::approx_tokens_from_byte_count_i64;
 use codex_utils_path_uri::PathUri;
 use codex_utils_stream_parser::AssistantTextChunk;
 use codex_utils_stream_parser::AssistantTextStreamParser;
@@ -1648,6 +1650,48 @@ pub(crate) fn build_prompt(
     }
 }
 
+fn estimate_prompt_components(prompt: &Prompt) -> PromptComponentTokenEstimate {
+    let system_bytes = i64::try_from(prompt.base_instructions.text.len()).unwrap_or(i64::MAX);
+    let tool_bytes = if prompt.tools.is_empty() {
+        0
+    } else {
+        serde_json::to_vec(prompt.tools.as_ref())
+            .ok()
+            .and_then(|json| i64::try_from(json.len()).ok())
+            .unwrap_or(0)
+    };
+    PromptComponentTokenEstimate {
+        system_instructions_tokens: approx_tokens_from_byte_count_i64(system_bytes),
+        tool_definitions_tokens: approx_tokens_from_byte_count_i64(tool_bytes),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn prompt_component_estimate_counts_only_base_instructions_and_sent_tool_specs() {
+    let mut prompt = Prompt::default();
+    prompt.base_instructions.text = "Follow the request carefully. ".repeat(10);
+    let without_tools = estimate_prompt_components(&prompt);
+    assert!(without_tools.system_instructions_tokens > 0);
+    assert_eq!(without_tools.tool_definitions_tokens, 0);
+
+    prompt.tools = vec![codex_tools::ToolSpec::WebSearch {
+        external_web_access: None,
+        indexed_web_access: None,
+        filters: None,
+        user_location: None,
+        search_context_size: None,
+        search_content_types: None,
+    }]
+    .into();
+    let with_tools = estimate_prompt_components(&prompt);
+    assert_eq!(
+        with_tools.system_instructions_tokens,
+        without_tools.system_instructions_tokens
+    );
+    assert!(with_tools.tool_definitions_tokens > 0);
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(deprecated)]
 #[instrument(level = "trace",
@@ -3005,6 +3049,7 @@ async fn try_run_sampling_request(
                     &response_id,
                     token_usage.as_ref(),
                     usage_metadata.as_ref(),
+                    Some(estimate_prompt_components(prompt)),
                 )
                 .await;
                 let budget_result = sess

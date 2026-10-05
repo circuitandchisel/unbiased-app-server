@@ -1273,6 +1273,7 @@ async fn turn_start_emits_raw_response_completed_with_upstream_usage(
             thread_id: thread.id,
             turn_id: turn.id,
             response_id: "resp-1".to_string(),
+            prompt_components: None,
             usage_metadata: serde_json::from_value(expected_metadata)?,
             usage: Some(TokenUsageBreakdown {
                 total_tokens: 37,

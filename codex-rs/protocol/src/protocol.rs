@@ -1926,6 +1926,14 @@ pub struct RawResponseItemEvent {
     pub item: ResponseItem,
 }
 
+/// Approximate component sizes for the request that produced a response.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptComponentTokenEstimate {
+    pub system_instructions_tokens: i64,
+    pub tool_definitions_tokens: i64,
+}
+
 /// Exact usage and metadata reported by one upstream Responses API completion.
 ///
 /// Unlike TokenCountEvent, this is not accumulated, estimated, or replayed.
@@ -1934,6 +1942,8 @@ pub struct RawResponseCompletedEvent {
     pub response_id: String,
     pub token_usage: Option<TokenUsage>,
     pub usage_metadata: Option<crate::ResponseUsageMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_components: Option<PromptComponentTokenEstimate>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]

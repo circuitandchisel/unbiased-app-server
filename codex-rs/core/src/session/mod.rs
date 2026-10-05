@@ -368,6 +368,7 @@ use codex_protocol::protocol::ModelVerification;
 use codex_protocol::protocol::ModelVerificationEvent;
 use codex_protocol::protocol::NetworkApprovalContext;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::PromptComponentTokenEstimate;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RawResponseCompletedEvent;
 use codex_protocol::protocol::RequestUserInputEvent;
@@ -4767,6 +4768,7 @@ impl Session {
         response_id: &str,
         usage: Option<&TokenUsage>,
         usage_metadata: Option<&ResponseUsageMetadata>,
+        prompt_components: Option<PromptComponentTokenEstimate>,
     ) {
         self.send_event(
             turn_context,
@@ -4774,6 +4776,7 @@ impl Session {
                 response_id: response_id.to_string(),
                 token_usage: usage.cloned(),
                 usage_metadata: usage_metadata.cloned(),
+                prompt_components,
             }),
         )
         .await;

@@ -1,6 +1,23 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "definitions": {
+    "PromptComponentTokenEstimate": {
+      "properties": {
+        "systemInstructionsTokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "toolDefinitionsTokens": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "systemInstructionsTokens",
+        "toolDefinitionsTokens"
+      ],
+      "type": "object"
+    },
     "ResponseUsageMetadata": {
       "description": "Usage metadata reported for one upstream response.",
       "properties": {
@@ -54,6 +71,16 @@
   },
   "description": "Internal-only notification containing the exact usage from one upstream Responses API completion.",
   "properties": {
+    "promptComponents": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/PromptComponentTokenEstimate"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "responseId": {
       "type": "string"
     },

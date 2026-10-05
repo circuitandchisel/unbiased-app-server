@@ -979,6 +979,7 @@ async fn drain_to_completed(
                     &response_id,
                     token_usage.as_ref(),
                     usage_metadata.as_ref(),
+                    None,
                 )
                 .await;
                 sess.update_token_usage_info(turn_context, token_usage.as_ref())

@@ -408,6 +408,7 @@ export type { ProjectChangeType } from "./ProjectChangeType";
 export type { ProjectChangedNotification } from "./ProjectChangedNotification";
 export type { ProjectRoot } from "./ProjectRoot";
 export type { ProjectSortKey } from "./ProjectSortKey";
+export type { PromptComponentTokenEstimate } from "./PromptComponentTokenEstimate";
 export type { QueuedSubmission } from "./QueuedSubmission";
 export type { RateLimitReachedType } from "./RateLimitReachedType";
 export type { RateLimitResetCredit } from "./RateLimitResetCredit";
