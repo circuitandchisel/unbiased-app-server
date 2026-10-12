@@ -6,6 +6,7 @@ pub(crate) mod models;
 pub(crate) mod realtime_call;
 pub(crate) mod realtime_websocket;
 mod request_body_limit;
+pub use request_body_limit::trim_response_request;
 pub(crate) mod responses;
 pub(crate) mod responses_websocket;
 pub(crate) mod search;

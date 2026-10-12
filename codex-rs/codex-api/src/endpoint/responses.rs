@@ -125,7 +125,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
                 ..
             }))
         ) && let Some(max_body_bytes) = self.max_body_bytes
-            && request_body_limit::omit_oldest_inline_media(&mut request).is_some()
+            && request_body_limit::omit_redundant_or_oldest_inline_media(&mut request).is_some()
         {
             tracing::warn!("retrying 413 response once with one more older media item omitted");
             let body = request_body_limit::encode_request(&mut request, max_body_bytes)?;

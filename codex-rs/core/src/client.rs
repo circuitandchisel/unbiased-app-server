@@ -987,7 +987,7 @@ impl ModelClient {
             }
         }
         let client_metadata = responses_metadata.client_metadata(include_internal);
-        let request = ResponsesApiRequest {
+        let mut request = ResponsesApiRequest {
             model: model_info.slug.clone(),
             instructions,
             input,
@@ -1006,7 +1006,16 @@ impl ModelClient {
             access_programs: None,
         };
         if self.state.provider.info().env_key.as_deref() == Some("UNBIASED_API_KEY") {
-            let bytes = serde_json::to_vec(&request)?.len();
+            let (bytes, omitted) = codex_api::trim_response_request(
+                &mut request,
+                crate::request_body_budget::UNBIASED_REQUEST_BUDGET_BYTES,
+            )?;
+            if omitted > 0 {
+                warn!(
+                    omitted_media = omitted,
+                    "omitted older inline media from model request"
+                );
+            }
             if bytes > crate::request_body_budget::UNBIASED_REQUEST_BUDGET_BYTES {
                 return Err(CodexErr::new(CodexErrorDetails::RequestBodyTooLarge {
                     bytes,
