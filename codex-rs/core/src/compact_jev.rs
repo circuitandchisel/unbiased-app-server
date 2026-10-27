@@ -99,8 +99,8 @@ pub(crate) async fn try_compact(
         tracing::info!(reason = "url_not_configured", "Jev compaction skipped");
         return false;
     };
-    let Ok(key) = std::env::var("UNBIASED_API_KEY") else {
-        tracing::warn!("Jev compaction skipped: Unbiased API key is unavailable");
+    let Ok(key) = provider_bearer_token(&turn_context.provider).await else {
+        tracing::warn!("Jev compaction skipped: Unbiased sign-in is unavailable");
         return false;
     };
     match compact_with_jev(sess, turn_context, initial_context_injection, &url, &key).await {
@@ -186,8 +186,30 @@ pub(crate) async fn preview_compact(
         return Err("Jev is unavailable for this provider");
     }
     let url = std::env::var("UNBIASED_JEV_URL").map_err(|_| "Jev URL is unavailable")?;
-    let key = std::env::var("UNBIASED_API_KEY").map_err(|_| "Unbiased API key is unavailable")?;
+    let key = provider_bearer_token(&turn_context.provider).await?;
     plan_compact(turn_context, items, &url, &key).await
+}
+
+// Share inference's credential resolution, including command-backed sign-in
+// and credential rotation. Do not read a separate process-global API key.
+async fn provider_bearer_token(
+    provider: &codex_model_provider::SharedModelProvider,
+) -> Result<String, &'static str> {
+    let auth = provider
+        .api_auth()
+        .await
+        .map_err(|_| "Unbiased sign-in is unavailable")?;
+    let headers = auth
+        .resolve_auth_headers()
+        .await
+        .map_err(|_| "Unbiased sign-in is unavailable")?;
+    headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .ok_or("Unbiased sign-in is unavailable")
 }
 
 async fn plan_compact(

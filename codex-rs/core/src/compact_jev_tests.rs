@@ -324,3 +324,35 @@ async fn jev_rejects_untrusted_destinations_before_sending_key() {
     let result = request_scores(&factory, "https://example.com/jev", "secret", &json!({})).await;
     assert!(result.is_err());
 }
+
+#[tokio::test]
+async fn jev_uses_provider_sign_in_without_an_env_key() {
+    let mut info =
+        codex_model_provider_info::built_in_model_providers(/*openai_base_url*/ None)
+            .remove("openai")
+            .unwrap();
+    info.name = "Unbiased".to_string();
+    info.requires_openai_auth = false;
+    info.experimental_bearer_token = Some("signed-in-user-token".into());
+    let provider = codex_model_provider::create_model_provider(info, /*auth_manager*/ None);
+    assert_eq!(
+        provider_bearer_token(&provider).await.unwrap(),
+        "signed-in-user-token"
+    );
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(header("authorization", "Bearer signed-in-user-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"answers": {}})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let key = provider_bearer_token(&provider).await.unwrap();
+    request_scores(
+        &HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        &format!("{}/v1/systemone", server.uri()),
+        &key,
+        &json!({"state":"test", "questions":{}}),
+    )
+    .await
+    .unwrap();
+}

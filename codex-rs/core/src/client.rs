@@ -1005,7 +1005,11 @@ impl ModelClient {
             client_metadata: Some(client_metadata),
             access_programs: None,
         };
-        if self.state.provider.info().env_key.as_deref() == Some("UNBIASED_API_KEY") {
+        // OAuth-backed Unbiased requests have no env_key, but still need the
+        // same request budget as API-key-backed requests.
+        if self.state.provider.info().name == "Unbiased"
+            || self.state.provider.info().env_key.as_deref() == Some("UNBIASED_API_KEY")
+        {
             let (bytes, omitted) = codex_api::trim_response_request(
                 &mut request,
                 crate::request_body_budget::UNBIASED_REQUEST_BUDGET_BYTES,
