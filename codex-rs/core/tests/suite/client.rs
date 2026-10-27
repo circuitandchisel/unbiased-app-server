@@ -1489,6 +1489,34 @@ async fn provider_auth_command_supplies_bearer_token() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unbiased_provider_uses_sign_in_without_an_api_key_env() {
+    skip_if_no_network!();
+    let server = MockServer::start().await;
+    let response = mount_sse_once_match(
+        &server,
+        header("authorization", "Bearer platform-user-token"),
+        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+    )
+    .await;
+    let fixture = ProviderAuthCommandFixture::new(&["platform-user-token"]).unwrap();
+    let mut provider = built_in_model_providers(/*openai_base_url*/ None)
+        .remove("openai")
+        .unwrap();
+    provider.name = "Unbiased".into();
+    provider.base_url = Some(format!("{}/v1", server.uri()));
+    provider.requires_openai_auth = false;
+    provider.supports_websockets = false;
+    provider.auth = Some(fixture.auth());
+    provider.request_max_retries = Some(0);
+    provider.stream_max_retries = Some(0);
+    send_request_with_provider(provider).await;
+    assert_eq!(
+        response.single_request().header("authorization"),
+        Some("Bearer platform-user-token".to_string())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn provider_auth_command_refreshes_after_401() {
     skip_if_no_network!();
 
