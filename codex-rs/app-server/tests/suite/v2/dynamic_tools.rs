@@ -21,8 +21,10 @@ use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::ThreadUnsubscribeParams;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput as V2UserInput;
@@ -54,6 +56,109 @@ const REMOTE_IMAGE_URL_ERROR: &str =
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(not(any(target_os = "macos", windows)))]
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[tokio::test]
+async fn cold_resume_replaces_dynamic_tools_and_keeps_history() -> Result<()> {
+    let responses = vec![
+        create_final_assistant_message_sse_response("First answer")?,
+        create_final_assistant_message_sse_response("Second answer")?,
+    ];
+    let server = create_mock_responses_server_sequence_unchecked(responses).await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    let mut original = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, original.initialize()).await??;
+    let start_id = original
+        .send_thread_start_request(ThreadStartParams {
+            dynamic_tools: Some(vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                name: "old_lookup".to_string(), description: "Original tool".to_string(),
+                input_schema: json!({"type":"object", "properties":{}, "additionalProperties":false}),
+                defer_loading: false,
+            })]),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadStartResponse { thread, .. } =
+        timeout(DEFAULT_READ_TIMEOUT, original.read_response(start_id)).await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        original.start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![V2UserInput::Text {
+                text: "Remember the original request".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        }),
+    )
+    .await??;
+    let tool = json!({"name":"search_new_tool", "description":"Search current sources", "inputSchema":{
+        "type":"object", "properties":{"query":{"type":"string"}}, "required":["query"], "additionalProperties":false
+    }});
+    let request = json!({"threadId":thread.id, "dynamicTools":[tool]});
+    let refused = original
+        .send_raw_request("thread/resume", Some(request.clone()))
+        .await?;
+    let error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        original.read_stream_until_error_message(RequestId::Integer(refused)),
+    )
+    .await??;
+    assert_eq!(error.error.code, -32600);
+    assert_eq!(
+        error.error.message,
+        "cannot replace dynamic tools on a busy or subscribed thread; unsubscribe the idle thread first"
+    );
+    let unsubscribe = original
+        .send_thread_unsubscribe_request(ThreadUnsubscribeParams {
+            thread_id: thread.id.clone(),
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        original.read_stream_until_response_message(RequestId::Integer(unsubscribe)),
+    )
+    .await??;
+    let mut resumed = original;
+    let resume_id = resumed
+        .send_raw_request("thread/resume", Some(request))
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        resumed.read_stream_until_response_message(RequestId::Integer(resume_id)),
+    )
+    .await??;
+    let result: ThreadResumeResponse = to_response(response)?;
+    assert_eq!(result.thread.id, thread.id);
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        resumed.start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![V2UserInput::Text {
+                text: "Use the new tool".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        }),
+    )
+    .await??;
+    let bodies = responses_bodies(&server).await?;
+    assert!(find_tool(&bodies[0], "old_lookup").is_some());
+    assert!(find_tool(&bodies[1], "old_lookup").is_none());
+    assert!(find_tool(&bodies[0], "search_new_tool").is_none());
+    assert!(find_tool(&bodies[1], "search_new_tool").is_some());
+    assert!(
+        bodies[1]["input"]
+            .to_string()
+            .contains("Remember the original request")
+    );
+
+    Ok(())
+}
 
 #[tokio::test]
 async fn thread_start_normalizes_legacy_dynamic_tools_into_model_request() -> Result<()> {

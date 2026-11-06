@@ -287,6 +287,19 @@ A non-ephemeral fork copies the source thread's current attachments, even when f
 
 Attachment creation and deletion requests using the same thread ID are serialized across connections. The requesting client receives its response before the compact update is broadcast, and duplicate creates or absent deletes do not emit updates. Deleting the owning thread removes its attachments under the same lifecycle exclusion; queued attachment mutations then report that the thread was not found.
 
+# Dynamic tools on cold resume
+
+Experimental clients can pass `dynamicTools` to `thread/resume`, using the same
+schema and validation as `thread/start`. A nonempty list replaces the tool
+set for the cold-resumed session; omission, null or an empty list restores the
+saved tools. The thread ID and conversation history are preserved.
+
+To replace tools, wait until the turn is idle, unsubscribe, then resume with the
+new list. A loaded idle session without subscribers is rebuilt immediately; a
+busy or subscribed session rejects the replacement rather than ignoring it.
+The host remains responsible for authorizing every dynamic tool call; declarations
+are not a permission grant.
+
 # Thread plugin settings
 
 `thread/settings/update` and `turn/start` accept `disabledPluginIds`, a list of

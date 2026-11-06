@@ -1263,12 +1263,35 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
+        self.resume_thread_with_history_and_dynamic_tools(
+            config,
+            initial_history,
+            auth_manager,
+            parent_trace,
+            client_mcp_extensions,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Cold-resume with explicit session tool declarations; an empty list restores saved tools.
+    #[instrument(level = "trace", skip_all)]
+    pub async fn resume_thread_with_history_and_dynamic_tools(
+        &self,
+        config: Config,
+        initial_history: InitialHistory,
+        auth_manager: Arc<AuthManager>,
+        parent_trace: Option<W3cTraceContext>,
+        client_mcp_extensions: ClientMcpExtensions,
+        dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
+    ) -> CodexResult<NewThread> {
         let agent_control = self.agent_control_for_config(&config);
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
         let options = StartThreadOptions {
             initial_history,
+            dynamic_tools,
             session_source: Some(session_source),
             thread_source,
             parent_trace,
