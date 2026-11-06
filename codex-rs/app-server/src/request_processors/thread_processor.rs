@@ -3659,6 +3659,10 @@ impl ThreadRequestProcessor {
             )));
         }
 
+        if let Some(tools) = &params.dynamic_tools {
+            validate_dynamic_tools(tools).map_err(invalid_request)?;
+        }
+
         if params.sandbox.is_some() && params.permissions.is_some() {
             return Err(invalid_request(
                 "`permissions` cannot be combined with `sandbox`",
@@ -3704,6 +3708,7 @@ impl ThreadRequestProcessor {
 
         let ThreadResumeParams {
             thread_id,
+            dynamic_tools,
             history,
             path,
             model,
@@ -3971,7 +3976,7 @@ impl ThreadRequestProcessor {
 
         match self
             .thread_manager
-            .resume_thread_with_history(
+            .resume_thread_with_history_and_dynamic_tools(
                 config,
                 thread_history,
                 self.auth_manager.clone(),
@@ -3982,6 +3987,7 @@ impl ThreadRequestProcessor {
                     ThreadResumeTarget::DaemonRecovery(_) => None,
                 },
                 client_mcp_extensions,
+                dynamic_tools.unwrap_or_default(),
             )
             .await
         {
@@ -4334,7 +4340,14 @@ impl ThreadRequestProcessor {
                 )));
             }
             let config_snapshot = existing_thread.config_snapshot().await;
-            let mismatch_details = collect_resume_override_mismatches(params, &config_snapshot);
+            let replacing_dynamic_tools = params
+                .dynamic_tools
+                .as_ref()
+                .is_some_and(|tools| !tools.is_empty());
+            let mut mismatch_details = collect_resume_override_mismatches(params, &config_snapshot);
+            if replacing_dynamic_tools {
+                mismatch_details.push("dynamicTools require a cold session".to_string());
+            }
             if !mismatch_details.is_empty() {
                 let has_subscribers = !self
                     .thread_state_manager
@@ -4374,6 +4387,12 @@ impl ThreadRequestProcessor {
                             warn!("thread {existing_thread_id} shutdown timed out");
                         }
                     }
+                }
+
+                if replacing_dynamic_tools {
+                    return Err(invalid_request(
+                        "cannot replace dynamic tools on a busy or subscribed thread; unsubscribe the idle thread first",
+                    ));
                 }
 
                 // Preserve rejoin semantics when another client can still observe
