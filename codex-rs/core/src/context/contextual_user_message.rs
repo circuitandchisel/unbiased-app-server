@@ -13,6 +13,7 @@ use super::LegacyModelMismatchWarning;
 use super::LegacyUnifiedExecProcessLimitWarning;
 use super::RecommendedPluginsInstructions;
 use super::SubagentNotification;
+use super::ToolCallFormatError;
 use super::TurnAborted;
 use super::UserGoalUpdate;
 use super::UserInstructions;
@@ -27,6 +28,7 @@ const CONTEXTUAL_USER_FRAGMENT_MATCHERS: &[fn(&str) -> bool] = &[
     codex_skills_extension::is_skill_prompt_fragment,
     UserShellCommand::matches_text,
     TurnAborted::matches_text,
+    ToolCallFormatError::matches_text,
     SubagentNotification::matches_text,
     InternalModelContextFragment::matches_text,
     // compatibility for user-role recommendation messages in existing rollouts

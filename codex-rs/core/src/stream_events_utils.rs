@@ -320,6 +320,28 @@ pub(crate) async fn handle_output_item_done(
     let mut output = OutputItemResult::default();
     let plan_mode = ctx.step_context.turn.mode() == ModeKind::Plan;
 
+    if crate::tools::malformed_calls::malformed_call_id(&item).is_some() {
+        ctx.sess
+            .services
+            .executed_tool_calls
+            .observe_non_dispatched_call(&item);
+        record_completed_response_item(ctx.sess.as_ref(), ctx.step_context.as_ref(), &item).await;
+        let budget = ctx
+            .step_context
+            .turn
+            .extension_data
+            .get_or_init(crate::tools::malformed_calls::FormatRecoveryBudget::default);
+        if !budget.request_correction(&ctx.step_context) {
+            return Err(CodexErr::Fatal(
+                "The model repeatedly returned malformed tool arguments. Stopped after two correction attempts; no malformed call was executed. Please try again with a smaller task.".to_string(),
+            ));
+        }
+        // for_prompt replaces the recorded call with bounded correction feedback
+        // and omits its paired output, including on a resumed conversation.
+        output.needs_follow_up = true;
+        return Ok(output);
+    }
+
     match ToolRouter::build_tool_call(item.clone()) {
         // The model emitted a tool call; log it, persist the item immediately, and queue the tool execution.
         Ok(Some(call)) => {

@@ -3348,3 +3348,25 @@ fn text_only_items_count_decoded_content() {
 
     assert_eq!(estimated, "Hello, \"world\"!\nこんにちは".len() as i64);
 }
+
+#[test]
+fn malformed_calls_in_resumed_history_are_quarantined_only_in_the_outgoing_snapshot() {
+    let bad: ResponseItem = serde_json::from_value(serde_json::json!({
+        "type": "function_call", "call_id": "bad", "name": "exec_command", "arguments": "{\"cmd\":\"unfinished"
+    })).unwrap();
+    let result: ResponseItem = serde_json::from_value(serde_json::json!({
+        "type": "function_call_output", "call_id": "bad", "output": "failed to parse function arguments"
+    })).unwrap();
+    let mut history = ContextManager::new();
+    history.replace(vec![bad.clone(), result.clone()]);
+    assert_eq!(
+        history.clone().for_prompt(&default_input_modalities()),
+        vec![ContextualUserFragment::into(
+            crate::context::ToolCallFormatError
+        )]
+    );
+    assert_eq!(
+        history.raw_items().cloned().collect::<Vec<_>>(),
+        vec![bad, result]
+    );
+}

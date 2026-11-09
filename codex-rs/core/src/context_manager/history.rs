@@ -591,7 +591,9 @@ impl ContextManager {
         input_modalities: &[InputModality],
     ) -> Vec<ResponseItemEnvelope> {
         self.normalize_history(input_modalities);
-        Arc::unwrap_or_clone(self.items)
+        let mut items = Arc::unwrap_or_clone(self.items);
+        crate::tools::malformed_calls::quarantine_malformed_calls(&mut items);
+        items
     }
 
     /// Iterates over raw response items without exposing their history envelopes.
