@@ -679,6 +679,7 @@ mod thread_processor_behavior_tests {
             developer_instructions: None,
             personality: None,
             exclude_turns: false,
+            dynamic_tools: None,
             initial_turns_page: None,
         };
         let config_snapshot = ThreadConfigSnapshot {

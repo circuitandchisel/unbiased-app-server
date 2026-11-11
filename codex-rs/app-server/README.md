@@ -300,6 +300,21 @@ busy or subscribed session rejects the replacement rather than ignoring it.
 The host remains responsible for authorizing every dynamic tool call; declarations
 are not a permission grant.
 
+# Client developer instructions
+
+Client `developerInstructions` overrides and the equivalent TOML
+`developer_instructions` setting have a hard limit of 40,000 UTF-8 bytes
+(10,000 estimated tokens). Oversized instructions reject configuration loading
+or session startup before inference; they are never silently truncated.
+
+Ordinary forks and cold resumes append a changed, nonempty client instruction
+block when inherited history already has a startup-context baseline. This also
+repairs older side chats whose overrides were never recorded. The update is
+persisted without rewriting parent history; an unchanged block is not repeated.
+To apply resume overrides to an already loaded session, wait until it is idle
+and unsubscribe before resuming. A busy or subscribed session retains its active
+configuration. These instructions do not authorize tool execution on their own.
+
 # Thread plugin settings
 
 `thread/settings/update` and `turn/start` accept `disabledPluginIds`, a list of

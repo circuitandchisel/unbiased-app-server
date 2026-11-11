@@ -77,6 +77,7 @@ pub(crate) use contextual_user_message::parse_visible_hook_prompt_message;
 pub(crate) use current_time_reminder::CurrentTimeReminder;
 pub(crate) use current_time_reminder::CurrentTimeUnavailable;
 pub(crate) use developer_instructions::DeveloperInstructions;
+pub(crate) use developer_instructions::validate_developer_instructions;
 pub(crate) use environments_instructions::EnvironmentsInstructions;
 pub(crate) use guardian_approved_action::GuardianApprovedAction;
 pub use guardian_assistant_context::render_retained_assistant_context;

@@ -133,7 +133,7 @@ async fn assert_fork_instructions_reach_model(history_mode: ThreadHistoryMode) -
     let bodies = requests
         .iter()
         .filter(|request| request.url.path().ends_with("/responses"))
-        .map(|request| request.body_json::<Value>())
+        .map(wiremock::Request::body_json::<Value>)
         .collect::<std::result::Result<Vec<_>, _>>()?;
     assert_eq!(bodies.len(), 6);
     for (body, expected_boundary_count) in bodies.iter().zip([0, 1, 1, 0, 1, 1]) {

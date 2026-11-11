@@ -140,6 +140,7 @@ mod thread_name_websocket;
 mod thread_queue;
 mod thread_read;
 mod thread_resume;
+mod thread_resume_instructions;
 mod thread_revert;
 mod thread_sections;
 mod thread_settings_update;
