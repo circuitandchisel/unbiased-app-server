@@ -240,6 +240,7 @@ mod reasoning_effort;
 mod submission;
 pub(crate) use reasoning_effort::RequestEffortUsage;
 pub(crate) use submission::Submission;
+mod fork_instructions;
 mod input_queue;
 mod mcp;
 mod mcp_prewarm;
@@ -583,6 +584,7 @@ impl Session {
             git_enrichment_policy,
             windows_sandbox_proxy_settings_mode,
         } = args;
+        crate::context::validate_developer_instructions(config.developer_instructions.as_deref())?;
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
 
@@ -1606,6 +1608,11 @@ impl Session {
                 )])
                 .await;
 
+                // Older forks may never have recorded their client instruction override.
+                // Reconcile the resumed configuration before admitting another user turn.
+                self.record_client_developer_instructions_update(&turn_context)
+                    .await;
+
                 // Defer seeding the session's initial context until the first turn starts so
                 // turn/start overrides can be merged before we write model-visible context.
                 if !is_subagent {
@@ -1655,6 +1662,10 @@ impl Session {
                     }
                 }
                 self.persist_rollout_items(&rollout_items).await;
+
+                // Append after the inherited prefix so the override is durable for this fork.
+                self.record_client_developer_instructions_update(&turn_context)
+                    .await;
 
                 // Agent spawn owns its final durability barrier so it can overlap the edge write.
                 let persist_context = match self.fork_persistence {
