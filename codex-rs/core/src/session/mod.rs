@@ -240,6 +240,7 @@ mod reasoning_effort;
 mod submission;
 pub(crate) use reasoning_effort::RequestEffortUsage;
 pub(crate) use submission::Submission;
+mod fork_instructions;
 mod input_queue;
 mod mcp;
 mod mcp_prewarm;
@@ -1655,6 +1656,28 @@ impl Session {
                     }
                 }
                 self.persist_rollout_items(&rollout_items).await;
+
+                // The inherited reference context suppresses initial-context insertion on the
+                // first real turn. Persist changed client instructions after the inherited
+                // prefix so the fork's override is visible to the model and survives resume.
+                // Subagents manage their own instruction inheritance and guardian policies.
+                if !is_subagent && self.reference_context_item().await.is_some() {
+                    let update = {
+                        let state = self.state.lock().await;
+                        fork_instructions::fork_developer_instructions_update(
+                            state.history.raw_items(),
+                            turn_context.developer_instructions.as_deref(),
+                        )
+                    };
+                    if let Some(update) = update {
+                        self.record_conversation_items(
+                            &turn_context,
+                            turn_context.model_info(),
+                            &[update],
+                        )
+                        .await;
+                    }
+                }
 
                 // Agent spawn owns its final durability barrier so it can overlap the edge write.
                 let persist_context = match self.fork_persistence {
